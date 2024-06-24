@@ -65,6 +65,18 @@ with open('deployment.yaml') as f:
     Only defined resources can be loaded. These are either kubernetes [standard resources](resources-and-models.md) 
     or [generic resources](generic-resources.md) manually defined.
 
+If we have a YAML file that both defines a CRD and loads an instance of it, we can use `create_resources_for_crds=True`, like:
+
+```python
+from lightkube import Client, codecs
+
+client = Client()
+with open('file-with-crd-and-instance.yaml') as f:
+    for obj in codecs.load_all_yaml(f, create_resources_for_crds=True):
+        client.create(obj)
+```
+
+This results in a generic resource being created for any CustomResourceDefinition in the YAML file.  
 
 It is also possible to create resources from a [jinja2](https://jinja.palletsprojects.com) template 
 passing the parameter `context`.
@@ -118,3 +130,85 @@ cm = ConfigMap(
 with open('deployment-out.yaml', 'w') as fw:
     codecs.dump_all_yaml([cm], fw)
 ```
+
+## Sorting resource objects
+
+Sometimes you have a manifest of resources where some depend on others.  For example,
+consider, the following `yaml_with_dependencies.yaml` file:
+
+```yaml
+kind: ClusterRoleBinding
+roleRef:
+  kind: ClusterRole
+  name: example-cluster-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: example-service-account
+...
+---
+kind: ClusterRole
+metadata:
+  name: example-cluster-role
+...
+---
+kind: ServiceAccount
+metadata:
+  name: example-service-account
+```
+
+where we have a `ClusterRoleBinding` that uses a `ClusterRole` and `ServiceAccount`. 
+In cases like this, the order in which we `apply` these resources matters as the
+`ClusterRoleBinding` depends on the others.  To sort these objects so that we do not
+encounter API errors when `apply`ing them, use `sort_objects(...)`.
+
+::: lightkube.sort_objects
+    :docstring:
+
+Revisiting the example above, we can apply from `yaml_with_dependencies.yaml` by:
+
+```python
+from lightkube import Client, codecs, sort_objects
+
+client = Client()
+with open('yaml_with_dependencies.yaml') as f:
+    objects = codecs.load_all_yaml(f)
+    for obj in sort_objects(objects):
+        client.create(obj)
+```
+
+`sort_objects` orders the objects in a way that is friendly to applying them as a
+batch, allowing us to loop through them as normal.
+
+Similarly, problems can arise when deleting a batch of objects.  For example, 
+consider the manifest `crs_and_crds.yaml`:
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+...
+spec:
+  names:
+    kind: SomeNewCr
+    ...
+---
+kind: SomeNewCr
+metadata:
+  name: instance-of-new-cr
+```
+
+Deleting this in a loop like above would first delete the `CustomResourceDefinition`,
+resulting in all instances of `SomeNewCr` to be deleted implicitly.  When we then
+attempted to delete `instance-of-new-cr`, we would encounter an API error.  
+Use `codecs.sort_objects(..., reverse=True)` to avoid this issue:
+
+```python
+from lightkube import Client, codecs, sort_objects
+
+client = Client()
+with open('crs_amd_crds.yaml') as f:
+    objects = codecs.load_all_yaml(f)
+    for obj in sort_objects(objects, reverse=True):
+        client.create(obj)
+```
+
+This orders the objects in a way that is friendly for deleting them as a batch.
